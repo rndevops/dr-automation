@@ -1,0 +1,16 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template for EventBridge Ruleevery-5m
+Resources:
+  Rule2cc2064b:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: every-5m
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Description: Triggers every 5 minutes
+      EventBusName: default
+      Targets:
+        - Id: Id8c47a62e-aa38-4b2c-8d90-8a055f0f0481
+          Arn:
+            Fn::Sub: >-
+              arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:DR_FAILOVER_AUTOMATION
