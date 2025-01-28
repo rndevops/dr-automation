@@ -1,0 +1,156 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Auto Scaling Group with NGINX servers'
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID for the deployment
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of at least two subnets in different AZs
+  DomainName:
+    Type: String
+    Description: Domain name for DNS record (e.g., example.com)
+  HostedZoneId:
+    Type: String
+    Description: Route53 Hosted Zone ID
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small]
+    Description: EC2 instance type
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+  MinSize:
+    Type: Number
+    Default: 2
+    Description: Minimum number of instances in ASG
+  MaxSize:
+    Type: Number
+    Default: 2
+    Description: Maximum number of instances in ASG
+  DesiredSize:
+    Type: Number
+    Default: 2
+    Description: Desired capacity of instances in ASG
+
+Resources:
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP access from ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP access to ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  WebServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: [ec2.amazonaws.com] }
+            Action: ['sts:AssumeRole']
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  WebServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref WebServerRole]
+
+  WebLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        InstanceType: !Ref InstanceType
+        ImageId: !Ref AmiId
+        IamInstanceProfile:
+          Arn: !GetAtt WebServerInstanceProfile.Arn
+        SecurityGroupIds: [!Ref WebServerSecurityGroup]
+        UserData: 
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum update -y
+            amazon-linux-extras install nginx1 -y
+            
+            # Create index.html with region info
+            REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+            echo "<h1>Hello from NGINX server running in primary region, $REGION</h1>" > /usr/share/nginx/html/index.html
+            
+            systemctl start nginx
+            systemctl enable nginx
+
+  WebASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WebLaunchTemplate
+        Version: !GetAtt WebLaunchTemplate.LatestVersionNumber
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      DesiredCapacity: !Ref DesiredSize
+      VPCZoneIdentifier: !Ref SubnetIds
+      TargetGroupARNs: [!Ref WebTargetGroup]
+
+  WebTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      HealthCheckPath: /
+
+  WebLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      SecurityGroups: [!Ref AlbSecurityGroup]
+      Subnets: !Ref SubnetIds
+
+  WebListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref WebTargetGroup
+      LoadBalancerArn: !Ref WebLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  WebDnsRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      RecordSets:
+        - Name: !Ref DomainName
+          Type: A
+          AliasTarget:
+            DNSName: !GetAtt WebLoadBalancer.DNSName
+            HostedZoneId: !GetAtt WebLoadBalancer.CanonicalHostedZoneID
+Conditions:
+  HasEnoughSubnets: !Not [!Equals [!Join ['', !Ref SubnetIds], '']]
+
+Outputs:
+  WebsiteURL:
+    Value: !Sub http://${DomainName}
+  LoadBalancerDNS:
+    Value: !GetAtt WebLoadBalancer.DNSName
+  ASGDetails:
+    Value: !Sub "ASG configured with Min:${MinSize} / Max:${MaxSize} instances"

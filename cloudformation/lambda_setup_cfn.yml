@@ -1,0 +1,79 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: DR Failover Lambda Setup
+
+Parameters:
+  PrimaryEndpoint:
+    Type: String
+    Default: primary.samplesite.com
+  DREndpoint:
+    Type: String
+    Default: dr.samplesite.com
+  DomainName:
+    Type: String
+    Default: www.samplesite.com
+  ASGName:
+    Type: String
+  HostedZoneId:
+    Type: String
+  CheckInterval:
+    Type: Number
+    Default: 300
+
+Resources:
+  FailoverLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: [lambda.amazonaws.com] }
+            Action: ['sts:AssumeRole']
+      Policies:
+        - PolicyName: DRFailoverPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - autoscaling:UpdateAutoScalingGroup
+                  - autoscaling:DescribeAutoScalingGroups
+                Resource: !Sub arn:aws:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/${ASGName}
+              - Effect: Allow
+                Action: route53:ChangeResourceRecordSets
+                Resource: !Sub arn:aws:route53:::hostedzone/${HostedZoneId}
+
+  FailoverLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt FailoverLambdaRole.Arn
+      Code:
+        ZipFile: |
+          # Paste from the file failover_lambda_reset.py
+      Environment:
+        Variables:
+          PRIMARY_ENDPOINT: !Ref PrimaryEndpoint
+          DR_ENDPOINT: !Ref DREndpoint
+          ASG_NAME: !Ref ASGName
+          HOSTED_ZONE_ID: !Ref HostedZoneId
+          DOMAIN_NAME: !Ref DomainName
+          CHECK_INTERVAL: !Ref CheckInterval
+      Timeout: 300
+
+  ScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: !Sub rate(${CheckInterval} seconds)
+      Targets:
+        - Arn: !GetAtt FailoverLambda.Arn
+          Id: DRFailoverTarget
+
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt FailoverLambda.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduledRule.Arn
